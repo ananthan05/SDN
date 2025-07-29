@@ -141,5 +141,48 @@ mn --version
 <img width="665" height="47" alt="image" src="https://github.com/user-attachments/assets/93e853ac-25b5-49fd-baa8-1f752c53a4c1" />
 
 
+## Running Simple SDN Application
+
+Terminal 1:
+
+```
+sudo mn --topo=single,3 --controller=remote,ip=127.0.0.1 --mac --switch=ovsk,protocols=OpenFlow13
+```
+<img width="1113" height="595" alt="image" src="https://github.com/user-attachments/assets/48ba6e7b-3f08-4622-890f-a22ce318a06c" />
+
+
+The command in Terminal 1 creates a simple topology in mininet. The topology consists of a single switch and three hosts that are connected to the switch. The topology can be tested by using pingall command on the same terminal. At this point, the hosts are unreachable. For making the hosts communicate with each other, there must be some rules which are implemented by the controller.
+
+
+Terminal 2:
+
+```
+ryu-manager ryu.app.simple_switch_13
+```
+<img width="1072" height="519" alt="image" src="https://github.com/user-attachments/assets/0b8e6f0d-e117-472c-8950-3ba1899469c0" />
+
+The command in Terminal 2 runs a simple application of switch. The program file for simple_switch_13 locates in /usr/lib/python2.7/ryu/ryu/app/directory. The simple_switch_13 program sets rules and policies in ryu controller, which are necessary for routing packets in a fashion similar to that of L2 Switch of conventional networking. Switch to Terminal 1 and run pingall command again. The hosts will be able to communicate with each other this time. A simple SDN infrastructure has been implemented at this point!
+
+Terminal 3:
+
+```
+sudo ovs-vsctl show
+```
+```
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1
+```
+
+<img width="1113" height="488" alt="image" src="https://github.com/user-attachments/assets/bc591bb7-989b-4b0f-9b66-c15fe9a5d994" />
+
+The commands in Terminal 3 show the brief configuration and flow table of Open vSwitch. These commands are used for inspecting the behavior and statistics of SDN switches upon receiving packets from the hosts.
+
+
+Terminal 1
+try ping command
+
+```
+pingall
+```
+<img width="1077" height="604" alt="image" src="https://github.com/user-attachments/assets/2dfd30f7-322c-4ada-89fc-ad1707d75f45" />
 
 
