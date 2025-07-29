@@ -141,7 +141,13 @@ mn --version
 <img width="665" height="47" alt="image" src="https://github.com/user-attachments/assets/93e853ac-25b5-49fd-baa8-1f752c53a4c1" />
 
 
-## Running Simple SDN Application
+## Running Simple SDN Application (Basic SDN)
+
+- A Mininet topology (switch + hosts)
+
+- A Ryu controller (simple_switch_13) that acts like a Layer 2 learning switch
+
+- Basic flow table inspection (OpenFlow rules)
 
 Terminal 1:
 
@@ -185,4 +191,192 @@ pingall
 ```
 <img width="1077" height="604" alt="image" src="https://github.com/user-attachments/assets/2dfd30f7-322c-4ada-89fc-ad1707d75f45" />
 
+in terminal 2;
 
+<img width="1019" height="542" alt="image" src="https://github.com/user-attachments/assets/5c671ce0-871d-42c2-a91e-9f8755e58746" />
+
+
+## Build a custom Ryu controller app that:
+
+- Learns the network topology.
+
+- Computes the shortest path (or custom path).
+
+- Installs flow rules to steer traffic.
+
+Step 1: Create a Custom Ryu App
+
+```
+cd /Desktop/ryu
+```
+```
+cd ryu
+```
+```
+cd app
+```
+<img width="1085" height="342" alt="image" src="https://github.com/user-attachments/assets/19c1a526-f5e7-45ee-8658-f77d670b8ff9" />
+
+```
+gedit traffic_engineering.py 
+```
+paste the code there
+
+```py
+from ryu.base import app_manager
+from ryu.controller import ofp_event
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
+from ryu.controller.handler import set_ev_cls
+from ryu.ofproto import ofproto_v1_3
+from ryu.topology import event, switches
+from ryu.topology.api import get_switch, get_link
+from ryu.lib.packet import packet, ethernet, ipv4
+import networkx as nx
+
+class TrafficEngineering(app_manager.RyuApp):
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    
+    def __init__(self, *args, **kwargs):
+        super(TrafficEngineering, self).__init__(*args, **kwargs)
+        self.topology_api_app = self
+        self.net = nx.DiGraph()
+        self.mac_to_port = {}
+        self.datapaths = {}
+
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        dp = ev.msg.datapath
+        ofp = dp.ofproto
+        parser = dp.ofproto_parser
+
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
+        self.add_flow(dp, 0, match, actions)
+        self.datapaths[dp.id] = dp
+
+    def add_flow(self, datapath, priority, match, actions):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+
+        mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
+                                match=match, instructions=inst)
+        datapath.send_msg(mod)
+
+    @set_ev_cls(event.EventSwitchEnter)
+    def get_topology_data(self, ev):
+        switch_list = get_switch(self.topology_api_app, None)
+        switches = [sw.dp.id for sw in switch_list]
+        self.net.add_nodes_from(switches)
+
+        links_list = get_link(self.topology_api_app, None)
+        for link in links_list:
+            src = link.src
+            dst = link.dst
+            self.net.add_edge(src.dpid, dst.dpid, port=src.port_no)
+            self.net.add_edge(dst.dpid, src.dpid, port=dst.port_no)
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def _packet_in_handler(self, ev):
+        msg = ev.msg
+        dp = msg.datapath
+        ofproto = dp.ofproto
+        parser = dp.ofproto_parser
+        in_port = msg.match['in_port']
+
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocol(ethernet.ethernet)
+        dst = eth.dst
+        src = eth.src
+        dpid = dp.id
+
+        self.mac_to_port.setdefault(dpid, {})
+        self.mac_to_port[dpid][src] = in_port
+
+        if dst in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst]
+        else:
+            out_port = ofproto.OFPP_FLOOD
+
+        # Always try to install path if destination is known
+        dst_dpid = self.get_host_location(dst)
+        if dst_dpid is not None:
+            if nx.has_path(self.net, dpid, dst_dpid):
+                path = nx.shortest_path(self.net, dpid, dst_dpid)
+                self.install_path(path, src, dst, dst_dpid)
+
+        actions = [parser.OFPActionOutput(out_port)]
+        out = parser.OFPPacketOut(
+            datapath=dp, buffer_id=ofproto.OFP_NO_BUFFER,
+            in_port=in_port, actions=actions, data=msg.data)
+        dp.send_msg(out)
+
+    def install_path(self, path, src, dst, dst_dpid):
+        # Handle destination switch separately
+        if dst_dpid in self.mac_to_port and dst in self.mac_to_port[dst_dpid]:
+            out_port = self.mac_to_port[dst_dpid][dst]
+            dp = self.datapaths.get(dst_dpid)
+            if dp:
+                parser = dp.ofproto_parser
+                match = parser.OFPMatch(eth_src=src, eth_dst=dst)
+                actions = [parser.OFPActionOutput(out_port)]
+                self.add_flow(dp, 1, match, actions)
+
+        # Install flows for intermediate switches
+        for i in range(len(path) - 1):
+            cur_switch = path[i]
+            next_switch = path[i + 1]
+            out_port = self.net[cur_switch][next_switch]['port']
+            dp = self.datapaths.get(cur_switch)
+            if dp:
+                parser = dp.ofproto_parser
+                match = parser.OFPMatch(eth_src=src, eth_dst=dst)
+                actions = [parser.OFPActionOutput(out_port)]
+                self.add_flow(dp, 1, match, actions)
+
+    def get_host_location(self, mac):
+        for dpid in self.mac_to_port:
+            if mac in self.mac_to_port[dpid]:
+                return dpid
+        return None
+```
+install network module 
+
+```
+pip install networkx
+```
+<img width="990" height="86" alt="image" src="https://github.com/user-attachments/assets/5f0bf5ed-9da3-476d-b95f-3190eb587ab4" />
+
+
+Step 2: Run It
+```
+ryu-manager ryu.app.traffic_engineering
+```
+
+<img width="1141" height="502" alt="image" src="https://github.com/user-attachments/assets/6f67e208-5d25-47df-a98c-90ae17091213" />
+
+
+Then in a new terminal:
+
+```
+sudo mn --topo=single,3 --controller=remote,ip=127.0.0.1 --mac --switch=ovsk,protocols=OpenFlow13
+```
+
+Ping between hosts to trigger flow rule installation
+
+```
+pingall
+```
+
+<img width="1149" height="730" alt="image" src="https://github.com/user-attachments/assets/0d3f01b0-5b4c-4d2e-8467-b0ca910c1b15" />
+
+<img width="1601" height="611" alt="image" src="https://github.com/user-attachments/assets/4b3a9292-a353-4db6-beb3-49b036aafbd0" />
+
+##  Open vSwitch + Ryu = Traffic Engineering Platform
+
+| Component            | Role                                                                 |
+|----------------------|----------------------------------------------------------------------|
+| **Open vSwitch (OVS)** | The data plane (switch) that executes flow rules from the controller |
+| **Ryu Controller**     | The control plane that pushes intelligent flow rules (e.g., shortest path, reroute) |
+| **Mininet**            | Emulates virtual network topologies                                 |
+| **OpenFlow 1.3**       | The protocol between controller and switches                        |
